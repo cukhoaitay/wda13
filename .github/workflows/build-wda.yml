@@ -1,115 +1,264 @@
-name: Build WebDriverAgent iOS 13
+name: Build WebDriverAgent - iOS 13.0+
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    # Xcode 14.3.1 phù hợp hơn với mục tiêu iOS 13
-    runs-on: macos-14
+    # macos-13 được dùng để tìm Xcode 14.x.
+    # Workflow sẽ tự kiểm tra Xcode thực tế có trên runner.
+    runs-on: macos-13
+
+    env:
+      WDA_VERSION: v5.8.3
+      IOS_DEPLOYMENT_TARGET: "13.0"
+      BUILD_CONFIGURATION: Debug
+      SDK: iphoneos
 
     steps:
+
+      # ==========================================================
+      # 1. Checkout WebDriverAgent
+      # ==========================================================
       - name: Checkout WebDriverAgent
         uses: actions/checkout@v4
         with:
           repository: appium/WebDriverAgent
-          ref: v5.8.3
+          ref: ${{ env.WDA_VERSION }}
           path: WebDriverAgent
+          fetch-depth: 1
 
-      # ---------------------------------------------------------
-      # 1. Kiểm tra Xcode có thực sự tồn tại
-      # ---------------------------------------------------------
-      - name: Find Xcode installations
+
+      # ==========================================================
+      # 2. Liệt kê Xcode thực tế trên GitHub Runner
+      # ==========================================================
+      - name: List installed Xcode versions
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=== /Applications ==="
-          ls -lah /Applications | grep -i Xcode || true
+          echo "=========================================="
+          echo "Installed Xcode applications"
+          echo "=========================================="
 
-          echo
-          echo "=== Xcode paths ==="
-          find /Applications -maxdepth 1 \
+          find /Applications \
+            -maxdepth 1 \
             -type d \
             -iname "Xcode*.app" \
             -print \
             | sort
 
-      # ---------------------------------------------------------
-      # 2. Bắt buộc dùng Xcode 14.3.1
-      # ---------------------------------------------------------
-      - name: Select Xcode 14.3.1
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo
+          echo "=========================================="
+          echo "Xcode versions"
+          echo "=========================================="
 
-          XCODE="/Applications/Xcode_14.3.1.app"
+          FOUND=0
 
-          if [ ! -d "$XCODE/Contents/Developer" ]; then
-            echo "::error::Xcode 14.3.1 was NOT found."
-            echo "Available Xcode installations:"
+          while IFS= read -r XCODE; do
+            FOUND=1
+
+            echo
+            echo "------------------------------------------"
+            echo "$XCODE"
+            echo "------------------------------------------"
+
+            "$XCODE/Contents/Developer/usr/bin/xcodebuild" -version || true
+
+          done < <(
             find /Applications \
               -maxdepth 1 \
               -type d \
               -iname "Xcode*.app" \
               -print \
               | sort
+          )
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "::error::No Xcode installation was found."
             exit 1
           fi
 
-          sudo xcode-select -s "$XCODE/Contents/Developer"
 
-          echo "Selected Xcode:"
-          xcode-select -p
-
-      # ---------------------------------------------------------
-      # 3. Xác nhận tuyệt đối Xcode đang dùng
-      # ---------------------------------------------------------
-      - name: Verify Xcode
+      # ==========================================================
+      # 3. Tìm Xcode 14.x
+      #
+      # Ưu tiên:
+      #   Xcode_14.3.1.app
+      #   Xcode_14.3.app
+      #   Xcode_14.2.app
+      #   Xcode_14.1.app
+      #   Xcode_14.0.app
+      #
+      # Không tìm thấy Xcode 14.x -> FAIL
+      # ==========================================================
+      - name: Select Xcode 14.x
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=== xcode-select ==="
-          xcode-select -p
+          XCODE=""
 
-          echo
-          echo "=== xcodebuild ==="
-          xcodebuild -version
+          CANDIDATES=(
+            "/Applications/Xcode_14.3.1.app"
+            "/Applications/Xcode_14.3.app"
+            "/Applications/Xcode_14.2.app"
+            "/Applications/Xcode_14.1.app"
+            "/Applications/Xcode_14.0.app"
+            "/Applications/Xcode.app"
+          )
 
-          echo
-          echo "=== SDK ==="
-          xcodebuild -showsdks
+          for CANDIDATE in "${CANDIDATES[@]}"; do
 
-          EXPECTED="Xcode 14.3.1"
+            if [ ! -d "$CANDIDATE/Contents/Developer" ]; then
+              continue
+            fi
 
-          if ! xcodebuild -version | grep -q "$EXPECTED"; then
-            echo "::error::Wrong Xcode selected!"
-            echo "Expected: $EXPECTED"
+            VERSION=$(
+              "$CANDIDATE/Contents/Developer/usr/bin/xcodebuild" \
+              -version 2>/dev/null \
+              | head -n 1
+            )
+
+            echo "Checking: $CANDIDATE"
+            echo "Version: $VERSION"
+
+            if echo "$VERSION" | grep -qE '^Xcode 14\.'; then
+              XCODE="$CANDIDATE"
+              break
+            fi
+
+          done
+
+          if [ -z "$XCODE" ]; then
+            echo
+            echo "::error::Xcode 14.x was NOT found on this runner."
+            echo
+            echo "Available Xcode:"
+            find /Applications \
+              -maxdepth 1 \
+              -type d \
+              -iname "Xcode*.app" \
+              -print \
+              | sort
+            echo
+            echo "Versions:"
+            for XCODE_APP in /Applications/Xcode*.app; do
+              if [ -d "$XCODE_APP/Contents/Developer" ]; then
+                "$XCODE_APP/Contents/Developer/usr/bin/xcodebuild" -version || true
+              fi
+            done
             exit 1
           fi
 
-      # ---------------------------------------------------------
-      # 4. Kiểm tra project / scheme
-      # ---------------------------------------------------------
-      - name: Check WebDriverAgent project
+          echo "=========================================="
+          echo "Selected Xcode"
+          echo "=========================================="
+          echo "$XCODE"
+
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+
+          echo
+          echo "xcode-select:"
+          xcode-select -p
+
+          echo
+          echo "xcodebuild:"
+          xcodebuild -version
+
+
+      # ==========================================================
+      # 4. Kiểm tra Xcode đã chọn
+      # ==========================================================
+      - name: Verify selected Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Xcode verification"
+          echo "=========================================="
+
+          xcode-select -p
+
+          echo
+          xcodebuild -version
+
+          XCODE_VERSION="$(xcodebuild -version | head -n 1)"
+
+          if ! echo "$XCODE_VERSION" | grep -qE '^Xcode 14\.'; then
+            echo "::error::Wrong Xcode selected: $XCODE_VERSION"
+            exit 1
+          fi
+
+          echo
+          echo "Selected Xcode is valid:"
+          echo "$XCODE_VERSION"
+
+
+      # ==========================================================
+      # 5. Kiểm tra SDK
+      # ==========================================================
+      - name: Verify iPhoneOS SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Available iPhoneOS SDKs"
+          echo "=========================================="
+
+          xcodebuild -showsdks
+
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+
+          echo
+          echo "Selected SDK:"
+          echo "$SDK_PATH"
+
+          SDK_VERSION="$(
+            xcrun --sdk iphoneos \
+              --show-sdk-version
+          )"
+
+          echo
+          echo "SDK version:"
+          echo "$SDK_VERSION"
+
+
+      # ==========================================================
+      # 6. Kiểm tra project
+      # ==========================================================
+      - name: Inspect WebDriverAgent project
         working-directory: WebDriverAgent
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=== Project ==="
+          echo "=========================================="
+          echo "WebDriverAgent"
+          echo "=========================================="
+
+          git rev-parse HEAD
+
+          echo
+          echo "Expected version:"
+          echo "$WDA_VERSION"
+
+          echo
+          echo "Project:"
           ls -lah WebDriverAgent.xcodeproj
 
           echo
-          echo "=== Schemes ==="
+          echo "Schemes:"
           xcodebuild \
             -project WebDriverAgent.xcodeproj \
             -list
 
-      # ---------------------------------------------------------
-      # 5. Build WDA
-      # ---------------------------------------------------------
+
+      # ==========================================================
+      # 7. Build WebDriverAgentRunner
+      # ==========================================================
       - name: Build WebDriverAgentRunner
         working-directory: WebDriverAgent
         shell: bash
@@ -118,107 +267,212 @@ jobs:
 
           rm -rf DerivedData
 
+          echo "=========================================="
+          echo "Building WebDriverAgentRunner"
+          echo "=========================================="
+
+          echo "Xcode:"
+          xcodebuild -version
+
+          echo
+          echo "SDK:"
+          xcrun --sdk iphoneos --show-sdk-version
+
+          echo
+          echo "Deployment target:"
+          echo "$IOS_DEPLOYMENT_TARGET"
+
           xcodebuild \
             build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
-            -sdk iphoneos \
-            -configuration Debug \
+            -sdk "$SDK" \
+            -configuration "$BUILD_CONFIGURATION" \
             -derivedDataPath DerivedData \
-            IPHONEOS_DEPLOYMENT_TARGET=13.0 \
+            IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
+            ARCHS="arm64" \
+            ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      # ---------------------------------------------------------
-      # 6. Kiểm tra sản phẩm build
-      # ---------------------------------------------------------
-      - name: Inspect build output
+
+      # ==========================================================
+      # 8. Kiểm tra WDA .app
+      # ==========================================================
+      - name: Verify WDA application
         working-directory: WebDriverAgent
         shell: bash
         run: |
           set -euo pipefail
 
-          BUILD_DIR="DerivedData/Build/Products/Debug-iphoneos"
+          BUILD_DIR="DerivedData/Build/Products/${BUILD_CONFIGURATION}-iphoneos"
           APP="$BUILD_DIR/WebDriverAgentRunner-Runner.app"
 
+          echo "=========================================="
+          echo "Build output"
+          echo "=========================================="
+
           if [ ! -d "$APP" ]; then
-            echo "::error::WebDriverAgentRunner-Runner.app not found"
+            echo "::error::WDA application not found:"
+            echo "$APP"
+            echo
+            find DerivedData/Build/Products \
+              -maxdepth 3 \
+              -print || true
             exit 1
           fi
 
-          echo "=== Build directory ==="
-          find "$BUILD_DIR" \
-            -maxdepth 2 \
-            -type d \
-            -print
+          echo "WDA APP:"
+          echo "$APP"
 
           echo
-          echo "=== WDA app ==="
+          echo "Contents:"
           ls -lah "$APP"
 
-          echo
-          echo "=== Info.plist ==="
-          /usr/libexec/PlistBuddy \
-            -c "Print :CFBundleIdentifier" \
-            "$APP/Info.plist"
 
-          /usr/libexec/PlistBuddy \
-            -c "Print :CFBundleExecutable" \
-            "$APP/Info.plist"
-
-          /usr/libexec/PlistBuddy \
-            -c "Print :MinimumOSVersion" \
-            "$APP/Info.plist" || true
-
-      # ---------------------------------------------------------
-      # 7. Kiểm tra Mach-O
-      # ---------------------------------------------------------
-      - name: Verify WDA binary
+      # ==========================================================
+      # 9. Kiểm tra Info.plist
+      # ==========================================================
+      - name: Verify Info.plist
         working-directory: WebDriverAgent
         shell: bash
         run: |
           set -euo pipefail
 
-          APP="DerivedData/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app"
+          APP="DerivedData/Build/Products/${BUILD_CONFIGURATION}-iphoneos/WebDriverAgentRunner-Runner.app"
+          PLIST="$APP/Info.plist"
+
+          echo "=========================================="
+          echo "Info.plist"
+          echo "=========================================="
+
+          echo
+          echo "Bundle ID:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "$PLIST"
+
+          echo
+          echo "Executable:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleExecutable" \
+            "$PLIST"
+
+          echo
+          echo "MinimumOSVersion:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :MinimumOSVersion" \
+            "$PLIST" || true
+
+          echo
+          echo "Version:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleShortVersionString" \
+            "$PLIST" || true
+
+
+      # ==========================================================
+      # 10. Kiểm tra Mach-O
+      # ==========================================================
+      - name: Verify Mach-O architecture and deployment target
+        working-directory: WebDriverAgent
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="DerivedData/Build/Products/${BUILD_CONFIGURATION}-iphoneos/WebDriverAgentRunner-Runner.app"
           BIN="$APP/WebDriverAgentRunner-Runner"
 
-          echo "=== file ==="
+          if [ ! -f "$BIN" ]; then
+            echo "::error::WDA executable not found"
+            exit 1
+          fi
+
+          echo "=========================================="
+          echo "Mach-O"
+          echo "=========================================="
+
+          echo
+          echo "file:"
           file "$BIN"
 
           echo
-          echo "=== Architectures ==="
+          echo "Architecture:"
           lipo -info "$BIN"
 
           echo
-          echo "=== Load commands ==="
-          otool -l "$BIN" | grep -A5 -E \
-            "LC_BUILD_VERSION|LC_VERSION_MIN_IPHONEOS" || true
+          echo "Minimum iOS / Build version:"
+          otool -l "$BIN" \
+            | grep -A6 \
+            -E 'LC_BUILD_VERSION|LC_VERSION_MIN_IPHONEOS' \
+            || true
 
-      # ---------------------------------------------------------
-      # 8. Đóng gói IPA
-      # ---------------------------------------------------------
+          echo
+          echo "Linked libraries:"
+          otool -L "$BIN" || true
+
+
+      # ==========================================================
+      # 11. Kiểm tra các framework bên trong WDA
+      # ==========================================================
+      - name: Inspect WDA frameworks
+        working-directory: WebDriverAgent
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="DerivedData/Build/Products/${BUILD_CONFIGURATION}-iphoneos/WebDriverAgentRunner-Runner.app"
+
+          echo "=========================================="
+          echo "Frameworks"
+          echo "=========================================="
+
+          if [ -d "$APP/Frameworks" ]; then
+
+            find "$APP/Frameworks" \
+              -maxdepth 2 \
+              -type f \
+              | sort
+
+          else
+
+            echo "No embedded Frameworks directory."
+
+          fi
+
+
+      # ==========================================================
+      # 12. Đóng gói IPA
+      # ==========================================================
       - name: Package IPA
         working-directory: WebDriverAgent
         shell: bash
         run: |
           set -euo pipefail
 
-          BUILD_DIR="DerivedData/Build/Products/Debug-iphoneos"
+          BUILD_DIR="DerivedData/Build/Products/${BUILD_CONFIGURATION}-iphoneos"
+          APP="$BUILD_DIR/WebDriverAgentRunner-Runner.app"
 
           rm -rf Payload
+          rm -f WebDriverAgentRunner-iOS13.ipa
+
           mkdir -p Payload
 
           cp -R \
-            "$BUILD_DIR/WebDriverAgentRunner-Runner.app" \
+            "$APP" \
             "Payload/WebDriverAgentRunner-Runner.app"
 
-          echo "=== Payload ==="
+          echo "=========================================="
+          echo "Payload"
+          echo "=========================================="
+
           find Payload \
             -maxdepth 2 \
             -print
 
-          rm -f WebDriverAgentRunner-iOS13.ipa
+          echo
+          echo "Creating IPA..."
 
           /usr/bin/zip \
             -qry \
@@ -226,59 +480,89 @@ jobs:
             Payload
 
           echo
-          echo "=== IPA ==="
+          echo "IPA created:"
           ls -lh WebDriverAgentRunner-iOS13.ipa
 
-      # ---------------------------------------------------------
-      # 9. Kiểm tra IPA sau khi đóng gói
-      # ---------------------------------------------------------
-      - name: Verify IPA metadata
+
+      # ==========================================================
+      # 13. Giải nén IPA và kiểm tra lại
+      # ==========================================================
+      - name: Verify final IPA
         working-directory: WebDriverAgent
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf /tmp/wda-ipa-check
-          mkdir -p /tmp/wda-ipa-check
+          CHECK_DIR="/tmp/wda-ipa-check"
+
+          rm -rf "$CHECK_DIR"
+          mkdir -p "$CHECK_DIR"
 
           unzip -q \
             WebDriverAgentRunner-iOS13.ipa \
-            -d /tmp/wda-ipa-check
+            -d "$CHECK_DIR"
 
-          PLIST="/tmp/wda-ipa-check/Payload/WebDriverAgentRunner-Runner.app/Info.plist"
+          APP="$CHECK_DIR/Payload/WebDriverAgentRunner-Runner.app"
+          PLIST="$APP/Info.plist"
+          BIN="$APP/WebDriverAgentRunner-Runner"
 
-          echo "=== IPA Info.plist ==="
+          if [ ! -d "$APP" ]; then
+            echo "::error::Invalid IPA: WDA app missing"
+            exit 1
+          fi
 
+          echo "=========================================="
+          echo "Final IPA verification"
+          echo "=========================================="
+
+          echo
+          echo "Bundle ID:"
           /usr/libexec/PlistBuddy \
             -c "Print :CFBundleIdentifier" \
             "$PLIST"
 
+          echo
+          echo "Executable:"
           /usr/libexec/PlistBuddy \
             -c "Print :CFBundleExecutable" \
             "$PLIST"
 
+          echo
+          echo "MinimumOSVersion:"
           /usr/libexec/PlistBuddy \
             -c "Print :MinimumOSVersion" \
             "$PLIST" || true
 
-      # ---------------------------------------------------------
-      # 10. Upload IPA
-      # ---------------------------------------------------------
+          echo
+          echo "Architecture:"
+          lipo -info "$BIN"
+
+          echo
+          echo "IPA structure:"
+          find "$CHECK_DIR/Payload" \
+            -maxdepth 2 \
+            -print
+
+
+      # ==========================================================
+      # 14. Upload IPA
+      # ==========================================================
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: WebDriverAgentRunner-iOS13-ipa
+          name: WebDriverAgentRunner-iOS13-IPA
           path: WebDriverAgent/WebDriverAgentRunner-iOS13.ipa
           if-no-files-found: error
           retention-days: 14
 
-      # ---------------------------------------------------------
-      # 11. Upload .app
-      # ---------------------------------------------------------
-      - name: Upload WDA .app
+
+      # ==========================================================
+      # 15. Upload APP
+      # ==========================================================
+      - name: Upload WDA APP
         uses: actions/upload-artifact@v4
         with:
-          name: WebDriverAgentRunner-iOS13-app
+          name: WebDriverAgentRunner-iOS13-APP
           path: WebDriverAgent/DerivedData/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app
           if-no-files-found: error
           retention-days: 14
