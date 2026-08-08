@@ -6,23 +6,18 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - name: Check available WDA tags
+      - name: Checkout WDA v5.8.3
         run: |
-          git ls-remote --tags https://github.com/appium/WebDriverAgent.git | grep -E "v[34]\." | tail -20
-
-      - name: Checkout WDA
-        uses: actions/checkout@v4
-        with:
-          repository: appium/WebDriverAgent
-          ref: v4.16.15
-          path: WebDriverAgent
+          git clone https://github.com/appium/WebDriverAgent.git WebDriverAgent
+          cd WebDriverAgent
+          git checkout v5.8.3
 
       - name: Select Xcode
         run: |
           if [ -d "/Applications/Xcode_15.2.app" ]; then
             sudo xcode-select -s /Applications/Xcode_15.2.app/Contents/Developer
-          elif [ -d "/Applications/Xcode_14.3.1.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_14.3.1.app/Contents/Developer
+          else
+            echo "Using default Xcode"
           fi
           xcodebuild -version
 
@@ -106,13 +101,13 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: WDA-ipa-iOS13-v4
+          name: WDA-ipa-iOS13
           path: WebDriverAgent/WebDriverAgentRunner-iOS13.ipa
           retention-days: 14
 
       - name: Upload tar.gz
         uses: actions/upload-artifact@v4
         with:
-          name: WDA-tar-iOS13-v4
+          name: WDA-tar-iOS13
           path: WebDriverAgent/WebDriverAgentRunner-iOS13.tar.gz
           retention-days: 14
