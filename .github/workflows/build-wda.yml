@@ -1,40 +1,43 @@
-name: Build WebDriverAgent (unsigned, for jailbroken device) - iOS 13+
-
+name: Build WebDriverAgent (iOS 13, jailbreak)
 on:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-14
-
     steps:
-      - name: Checkout WebDriverAgent source
+      - name: Checkout WDA v3.19.2 (tương thích iOS 13 tốt nhất)
         uses: actions/checkout@v4
         with:
           repository: appium/WebDriverAgent
-          ref: v5.8.3
+          ref: v3.19.2
           path: WebDriverAgent
 
-      - name: Select best available Xcode
+      - name: Select Xcode
         run: |
           if [ -d "/Applications/Xcode_15.2.app" ]; then
             sudo xcode-select -s /Applications/Xcode_15.2.app/Contents/Developer
-          elif [ -d "/Applications/Xcode_14.3.1.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_14.3.1.app/Contents/Developer
           else
             echo "Using default Xcode"
           fi
           xcodebuild -version
 
-      - name: Resolve SPM dependencies
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Resolve dependencies
         working-directory: WebDriverAgent
         run: |
+          # v3.x dùng Carthage
+          brew install carthage
+          carthage bootstrap --platform iOS 2>/dev/null || true
+          # Hoặc SPM
           xcodebuild -resolvePackageDependencies \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
-            -clonedSourcePackagesDirPath .packages
+            -clonedSourcePackagesDirPath .packages 2>/dev/null || true
 
-      - name: Build WebDriverAgentRunner
+      - name: Build
         working-directory: WebDriverAgent
         run: |
           xcodebuild build-for-testing \
@@ -43,42 +46,25 @@ jobs:
             -sdk iphoneos \
             -configuration Debug \
             -derivedDataPath DerivedData \
-            -clonedSourcePackagesDirPath .packages \
             IPHONEOS_DEPLOYMENT_TARGET=13.0 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS="" \
             ENABLE_BITCODE=NO \
-            DEBUG_INFORMATION_FORMAT=dwarf \
-            SWIFT_OPTIMIZATION_LEVEL=-Onone \
             ONLY_ACTIVE_ARCH=NO
 
-      # ─── FIX CRASH: Cài ldid rồi fake-sign đúng cách ───────────────────
-      - name: Install ldid (fake codesign tool for jailbreak)
-        run: brew install ldid
-
-      - name: Create entitlements.plist for jailbreak
+      - name: Create entitlements
         run: |
           cat > entitlements.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <!-- Cho phép app chạy như platform app, bypass sandbox -->
               <key>platform-application</key>
               <true/>
-              <!-- Bỏ qua kiểm tra thư viện (cần cho WDA frameworks) -->
               <key>com.apple.private.skip-library-validation</key>
               <true/>
-              <!-- Cho phép debugger attach (WDA cần cái này) -->
               <key>get-task-allow</key>
-              <true/>
-              <!-- Cho phép WDA điều khiển UI -->
-              <key>com.apple.springboard.debugapplications</key>
-              <true/>
-              <key>run-unsigned-code</key>
               <true/>
               <key>com.apple.private.security.no-sandbox</key>
               <true/>
@@ -88,124 +74,54 @@ jobs:
           </plist>
           EOF
 
-      - name: Remove old CodeSignature & fake-sign with ldid
+      - name: Sign with ldid
         working-directory: WebDriverAgent
         run: |
           APP="DerivedData/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app"
-          MAIN_BIN="$APP/WebDriverAgentRunner-Runner"
+          
+          # Sign main binary
+          ldid -S../entitlements.plist "$APP/WebDriverAgentRunner-Runner"
+          
+          # Sign tất cả frameworks
+          find "$APP/Frameworks" \( -name "*.framework" -o -name "*.dylib" \) | while read f; do
+            if [ -d "$f" ]; then
+              name=$(basename "$f" .framework)
+              [ -f "$f/$name" ] && ldid -S "$f/$name"
+            else
+              ldid -S "$f"
+            fi
+          done
+          
+          echo "✅ Sign xong"
 
-          echo "=== Xóa chữ ký cũ ==="
-          rm -rf "$APP/_CodeSignature"
-
-          echo "=== Fake-sign binary chính ==="
-          ldid -S../entitlements.plist "$MAIN_BIN"
-
-          echo "=== Fake-sign tất cả Frameworks ==="
-          if [ -d "$APP/Frameworks" ]; then
-            find "$APP/Frameworks" -name "*.framework" | while read fw; do
-              BINARY=$(defaults read "$fw/Info.plist" CFBundleExecutable 2>/dev/null || basename "$fw" .framework)
-              if [ -f "$fw/$BINARY" ]; then
-                echo "  Signing: $fw/$BINARY"
-                ldid -S "$fw/$BINARY"
-              fi
-            done
-
-            # Sign các dylib rời (nếu có)
-            find "$APP/Frameworks" -name "*.dylib" | while read dylib; do
-              echo "  Signing dylib: $dylib"
-              ldid -S "$dylib"
-            done
-          else
-            echo "  Không có Frameworks folder"
-          fi
-
-          echo "=== Xác nhận kết quả ==="
-          ldid -e "$MAIN_BIN" && echo "✅ ldid sign thành công" || echo "❌ ldid sign thất bại"
-
-      - name: Package IPA
+      - name: Package
         working-directory: WebDriverAgent
         run: |
           APP="DerivedData/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app"
-          rm -rf Payload
+          
+          # IPA
           mkdir -p Payload
           cp -R "$APP" Payload/
-          zip -r WebDriverAgentRunner-iOS13-signed.ipa Payload/
-          echo "✅ IPA size: $(du -sh WebDriverAgentRunner-iOS13-signed.ipa)"
-
-      - name: Package .app as tar.gz (SSH install)
-        working-directory: WebDriverAgent
-        run: |
-          tar -czf WebDriverAgentRunner-iOS13-signed.tar.gz \
+          zip -r WebDriverAgentRunner-iOS13.ipa Payload/
+          
+          # tar.gz để SSH
+          tar -czf WebDriverAgentRunner-iOS13.tar.gz \
             -C "DerivedData/Build/Products/Debug-iphoneos" \
             WebDriverAgentRunner-Runner.app
-          echo "✅ TAR size: $(du -sh WebDriverAgentRunner-iOS13-signed.tar.gz)"
+          
+          echo "✅ IPA: $(du -sh WebDriverAgentRunner-iOS13.ipa)"
+          echo "✅ TAR: $(du -sh WebDriverAgentRunner-iOS13.tar.gz)"
 
-      # ─── Tạo script cài đặt tự động ────────────────────────────────────
-      - name: Create install script for jailbroken device
-        run: |
-          cat > install_wda.sh << 'SCRIPT'
-          #!/bin/bash
-          # Cách dùng: bash install_wda.sh <device-ip>
-          # Yêu cầu: SSH root đã được enable trên device
-
-          DEVICE_IP="${1:-10.0.0.1}"
-          TAR_FILE="WebDriverAgentRunner-iOS13-signed.tar.gz"
-
-          echo "📦 Copy WDA lên device $DEVICE_IP..."
-          scp "$TAR_FILE" "root@$DEVICE_IP:/tmp/"
-
-          echo "🔧 Cài đặt trên device..."
-          ssh "root@$DEVICE_IP" << 'REMOTE'
-            set -e
-
-            # Giải nén
-            tar -xzf /tmp/WebDriverAgentRunner-iOS13-signed.tar.gz -C /tmp/
-
-            # Xóa bản cũ nếu có
-            rm -rf /Applications/WebDriverAgentRunner-Runner.app 2>/dev/null || true
-
-            # Copy vào Applications
-            cp -R /tmp/WebDriverAgentRunner-Runner.app /Applications/
-
-            # Fix permissions
-            chmod -R 755 /Applications/WebDriverAgentRunner-Runner.app
-            chown -R root:wheel /Applications/WebDriverAgentRunner-Runner.app
-
-            # Dọn tmp
-            rm -rf /tmp/WebDriverAgentRunner-Runner.app
-            rm /tmp/WebDriverAgentRunner-iOS13-signed.tar.gz
-
-            # Refresh SpringBoard
-            uicache --all 2>/dev/null || uicache
-
-            echo "✅ Cài xong! Chạy lệnh sau để start WDA:"
-            echo "   /Applications/WebDriverAgentRunner-Runner.app/WebDriverAgentRunner-Runner"
-          REMOTE
-
-          echo ""
-          echo "✅ Hoàn tất! Để chạy WDA:"
-          echo "   ssh root@$DEVICE_IP '/Applications/WebDriverAgentRunner-Runner.app/WebDriverAgentRunner-Runner &'"
-          echo "   Sau đó kiểm tra: curl http://$DEVICE_IP:8100/status"
-          SCRIPT
-          chmod +x install_wda.sh
-
-      - name: Upload signed IPA
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: WebDriverAgentRunner-ipa-iOS13-ldid-signed
-          path: WebDriverAgent/WebDriverAgentRunner-iOS13-signed.ipa
+          name: WDA-ipa-iOS13-v3
+          path: WebDriverAgent/WebDriverAgentRunner-iOS13.ipa
           retention-days: 14
 
-      - name: Upload signed tar.gz (SSH install)
+      - name: Upload tar.gz
         uses: actions/upload-artifact@v4
         with:
-          name: WebDriverAgentRunner-tar-iOS13-ldid-signed
-          path: WebDriverAgent/WebDriverAgentRunner-iOS13-signed.tar.gz
-          retention-days: 14
-
-      - name: Upload install script
-        uses: actions/upload-artifact@v4
-        with:
-          name: install-script
-          path: install_wda.sh
+          name: WDA-tar-iOS13-v3
+          path: WebDriverAgent/WebDriverAgentRunner-iOS13.tar.gz
           retention-days: 14
